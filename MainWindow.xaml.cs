@@ -88,6 +88,7 @@ public partial class MainWindow : Window
     const double NoticeWash = 0.2; // how much of the icon's colour the square behind it takes
     const double SkipMemory = 3; // seconds a press of "previous" stays the reason for the cover that comes next
     const double VolumeTrack = 162;
+    const float AudioActivityThreshold = 0.0001f;
     const double VolumePush = 7; // how far the bar gives when the volume is asked past an end of it
     const double SeekTrack = 260;
     const double SeekThin = 6, SeekHover = 9, SeekDrag = 12; // bar thickness: resting, under the pointer, while scrubbing
@@ -152,7 +153,7 @@ public partial class MainWindow : Window
     readonly BitmapCache _lyricCache = new() { SnapsToDevicePixels = true };
     readonly Alarm _alarm = new();
     readonly Stopwatch _time = Stopwatch.StartNew();
-    readonly DispatcherTimer _tick, _transientTimer, _collapseTimer, _awayTimer, _pushTimer, _dropTimer;
+    readonly DispatcherTimer _tick, _transientTimer, _collapseTimer, _awayTimer, _pushTimer, _dropTimer, _idleTimer;
     readonly View? _forced;
     readonly double _forcedTimer;
 
@@ -169,6 +170,8 @@ public partial class MainWindow : Window
     bool _dropping; // files are being dragged over the island
     bool _carrying; // ...or out of it, from the shelf
     bool _picking; // files are being picked for the shelf in the system's dialog
+    bool _hasAudioActivity; // tracks if there is current audio activity
+    DateTime _lastAudioActivity; // timestamp of last detected audio
     Panel _beforeDrop; // what was open before the drag came over
     ShelfTile? _tilePressed; // the tile the pointer went down on...
     Point _tileFrom; // ...and where
@@ -208,10 +211,28 @@ public partial class MainWindow : Window
     bool _playerWaiting; // ...and holds it with placeholder lines while they are looked up
     IntPtr _hwnd;
     int _shellMessage;
+    readonly bool _obsMode;
+    Window? _placementGuide;
+    bool _placementMode, _placementDragging;
+    Point _placementGrab;
+    Native.Monitor? _placementMonitor;
+    bool _placementBottom;
 
     public MainWindow()
     {
+        string[] args = Environment.GetCommandLineArgs();
+        _obsMode = args.Any(arg => string.Equals(arg, "--obs", StringComparison.OrdinalIgnoreCase));
+
         InitializeComponent();
+        // The audio-device page is opened only from Settings; never show it during startup.
+        AudioDeviceView.Visibility = Visibility.Collapsed;
+        if (_obsMode)
+        {
+            // OBS enumerates this as a normal application window. The regular mode remains a tool window.
+            ShowInTaskbar = true;
+            Title = "Dynamic Island (OBS)";
+        }
+
         // room for the island at its largest and furthest from the top of the screen: the window itself never
         // changes size, or everything in it would jump as it did
         Width *= Scales[^1] / 100.0;
@@ -285,7 +306,6 @@ public partial class MainWindow : Window
         _gap.Tune(240, 26);
 
         // debug aid: `DynamicIsland.exe --view MediaBig` pins one state, `--timer 90` starts a 90 s countdown
-        string[] args = Environment.GetCommandLineArgs();
         int flag = Array.IndexOf(args, "--view");
         if (flag >= 0 && flag + 1 < args.Length && Enum.TryParse(args[flag + 1], true, out View forced)) _forced = forced;
         flag = Array.IndexOf(args, "--timer");
@@ -348,6 +368,19 @@ public partial class MainWindow : Window
             UpdateView();
         };
 
+        _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _idleTimer.Tick += (_, _) =>
+        {
+            if (Settings.HideOnIdle && !_hasAudioActivity && (DateTime.Now - _lastAudioActivity).TotalSeconds >= 3)
+            {
+                if (_current != View.Idle && !_hover && !_pressed && _panel == Panel.None)
+                {
+                    UpdateView();
+                }
+            }
+        };
+        _idleTimer.Start();
+
         Loaded += OnLoaded;
     }
 
@@ -357,8 +390,10 @@ public partial class MainWindow : Window
         _hwnd = new WindowInteropHelper(this).Handle;
         // no Alt-Tab entry, and clicking the island never steals focus from the app you're in
         long ex = Native.GetWindowLongPtr(_hwnd, Native.GWL_EXSTYLE).ToInt64();
-        Native.SetWindowLongPtr(_hwnd, Native.GWL_EXSTYLE,
-            new IntPtr(ex | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE));
+        ex = _obsMode
+            ? (ex & ~Native.WS_EX_TOOLWINDOW) | Native.WS_EX_APPWINDOW | Native.WS_EX_NOACTIVATE
+            : ex | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE;
+        Native.SetWindowLongPtr(_hwnd, Native.GWL_EXSTYLE, new IntPtr(ex));
 
         _shellMessage = (int)Native.RegisterWindowMessage("SHELLHOOK");
         if (Native.RegisterShellHookWindow(_hwnd)) HwndSource.FromHwnd(_hwnd).AddHook(OnShellMessage);
@@ -392,12 +427,26 @@ public partial class MainWindow : Window
         SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.InvokeAsync(Place);
         UpdateClock();
         UpdateSwitches(false);
+        UpdateAudioDeviceVisibility();
         UpdateLook();
         SyncAccent(false);
         SyncShelf();
         Intro();
         _tick.Start();
         if (_forcedTimer > 0) StartTimer(TimeSpan.FromSeconds(_forcedTimer));
+
+        // Debug: show available audio devices
+        Console.WriteLine("\n=== ДОСТУПНЫЕ АУДИОУСТРОЙСТВА ===");
+        var devices = SpectrumService.GetDevices();
+        foreach (var dev in devices)
+        {
+            Console.WriteLine($"  {(dev.IsDefault ? "[ПО УМОЛЧАНИЮ]" : "              ")} {dev.Name}");
+            Console.WriteLine($"                    ID: {dev.Id}");
+        }
+        Console.WriteLine($"\nВыбрано: {Settings.AudioDevice ?? "ПО УМОЛЧАНИЮ"}");
+        Console.WriteLine("===================================\n");
+
+        _spectrum.SetDevice(Settings.CaptureFromApp ? null : Settings.AudioDevice);
 
         try { await _media.StartAsync(); }
         catch (Exception ex) { App.Log(ex); }
@@ -407,8 +456,208 @@ public partial class MainWindow : Window
 
     void Place()
     {
-        Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
-        Top = 0;
+        Native.Monitor[] monitors = Native.GetMonitors().ToArray();
+        bool Valid(Native.Monitor m) => m.Width > 0 && m.Height > 0;
+        Native.Monitor? chosen = monitors.FirstOrDefault(m => Valid(m) &&
+            !string.IsNullOrWhiteSpace(Settings.PlacementMonitor) &&
+            string.Equals(m.Name, Settings.PlacementMonitor, StringComparison.OrdinalIgnoreCase));
+        if (chosen is not { } monitor || !Valid(monitor))
+            chosen = monitors.FirstOrDefault(m => Valid(m) && m.Primary);
+        if (chosen is not { } monitor2 || !Valid(monitor2))
+            chosen = monitors.FirstOrDefault(m => Valid(m) && m.Left <= 0 && m.Right > 0 && m.Top <= 0 && m.Bottom > 0);
+        if (chosen is not { } monitor3 || !Valid(monitor3))
+            chosen = monitors.FirstOrDefault(Valid);
+        if (chosen is not { } selected || !Valid(selected)) return;
+
+        _placementMonitor = selected;
+        _placementBottom = Settings.PlacementBottom;
+        PositionOnMonitor(selected, _placementBottom);
+    }
+
+    void PositionOnMonitor(Native.Monitor monitor, bool bottom)
+    {
+        double size = Math.Max(_size.Value, 0.01);
+        double islandHeight = Math.Max(_h.Value, 24) * size * Math.Max(_scale.Value, 0.01);
+        Left = monitor.Left + (monitor.Width - Width) / 2.0;
+        Top = bottom ? monitor.Bottom - islandHeight - _gap.Value * 2 : monitor.Top;
+    }
+
+    (double Width, double Height) PlacementSize()
+    {
+        double size = Math.Max(_size.Value, 0.01);
+        return (Math.Max(_w.Value, 24) * size, Math.Max(_h.Value, 24) * size);
+    }
+
+    void BeginPlacement()
+    {
+        _placementMode = true;
+        _placementDragging = false;
+        _panel = Panel.None;
+        _transient = null;
+        _transientTimer.Stop();
+        _hover = _pressed = false;
+        Quiet();
+        Root.Cursor = Cursors.SizeAll;
+        UpdateView();
+        SetTargets();
+
+        if (Native.TryGetCursorPosition(out int x, out int y))
+            UpdatePlacementGuide(x, y);
+        else if (_placementMonitor is { } monitor)
+            ShowPlacementGuide(monitor, _placementBottom);
+    }
+
+    void FinishPlacement()
+    {
+        if (_placementMonitor is { } monitor)
+        {
+            Settings.PlacementMonitor = monitor.Name;
+            Settings.PlacementBottom = _placementBottom;
+            PositionOnMonitor(monitor, _placementBottom);
+        }
+
+        _placementDragging = false;
+        _placementMode = false;
+        ReleaseMouseCapture();
+        Root.ReleaseMouseCapture();
+        Root.Cursor = null;
+        HidePlacementGuide();
+        SetTargets();
+    }
+
+    void CancelPlacement()
+    {
+        _placementDragging = false;
+        _placementMode = false;
+        ReleaseMouseCapture();
+        Root.ReleaseMouseCapture();
+        Root.Cursor = null;
+        HidePlacementGuide();
+        Place();
+        SetTargets();
+    }
+
+    void UpdatePlacementGuide(int x, int y)
+    {
+        Native.Monitor? monitor = Native.MonitorAt(x, y);
+        if (monitor is not { } target) return;
+
+        _placementMonitor = target;
+        _placementBottom = y >= target.Top + target.Height / 2;
+        ShowPlacementGuide(target, _placementBottom);
+    }
+
+    void ShowPlacementGuide(Native.Monitor monitor, bool bottom)
+    {
+        (double width, double height) = PlacementSize();
+        double x = monitor.Left + (monitor.Width - width) / 2.0;
+        double y = bottom ? monitor.Bottom - _gap.Value - height : monitor.Top + _gap.Value;
+
+        if (_placementGuide == null)
+        {
+            var glow = new Border
+            {
+                BorderBrush = new SolidColorBrush(Color.FromArgb(150, 105, 105, 255)),
+                BorderThickness = new Thickness(5),
+                Background = Brushes.Transparent,
+                CornerRadius = new CornerRadius(17),
+                Effect = new BlurEffect { Radius = 8, RenderingBias = RenderingBias.Performance },
+                IsHitTestVisible = false
+            };
+            var outline = new Border
+            {
+                BorderBrush = new SolidColorBrush(Color.FromArgb(235, 255, 255, 255)),
+                BorderThickness = new Thickness(2),
+                Background = new SolidColorBrush(Color.FromArgb(24, 255, 255, 255)),
+                CornerRadius = new CornerRadius(17),
+                IsHitTestVisible = false
+            };
+            var guide = new Grid();
+            guide.Children.Add(glow);
+            guide.Children.Add(outline);
+
+            var outlinePulse = new DoubleAnimation(0.55, 1, TimeSpan.FromMilliseconds(700))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            };
+            var glowPulse = new DoubleAnimation(0.2, 0.8, TimeSpan.FromMilliseconds(700))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            };
+            outline.BeginAnimation(UIElement.OpacityProperty, outlinePulse);
+            glow.BeginAnimation(UIElement.OpacityProperty, glowPulse);
+
+            _placementGuide = new Window
+            {
+                AllowsTransparency = true,
+                Background = Brushes.Transparent,
+                Content = guide,
+                ShowActivated = false,
+                ShowInTaskbar = false,
+                Topmost = true,
+                WindowStyle = WindowStyle.None,
+                ResizeMode = ResizeMode.NoResize,
+                IsHitTestVisible = false
+            };
+            _placementGuide.SourceInitialized += (_, _) =>
+                Native.MakeClickThrough(new WindowInteropHelper(_placementGuide).Handle);
+        }
+
+        if (_placementGuide.Content is Grid guideGrid)
+        {
+            foreach (Border border in guideGrid.Children.OfType<Border>())
+                border.CornerRadius = new CornerRadius(Math.Min(17, height / 2));
+        }
+        _placementGuide.Width = width;
+        _placementGuide.Height = height;
+        _placementGuide.Left = x;
+        _placementGuide.Top = y;
+        bool entering = !_placementGuide.IsVisible;
+        if (entering)
+        {
+            _placementGuide.Show();
+            if (_placementGuide.Content is Grid shownGuide) AnimatePlacementGuideIn(shownGuide);
+        }
+    }
+
+    void AnimatePlacementGuideIn(Grid guide)
+    {
+        guide.RenderTransformOrigin = new Point(0.5, 0.5);
+        var scale = new ScaleTransform(0.86, 0.86);
+        guide.RenderTransform = scale;
+        guide.Opacity = 0;
+
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var blur = new BlurEffect { Radius = 12, RenderingBias = RenderingBias.Performance };
+        guide.Effect = blur;
+
+        TimeSpan delay = TimeSpan.FromMilliseconds(70);
+        var sharpen = new DoubleAnimation(12, 0, Ms(300))
+        {
+            BeginTime = delay,
+            EasingFunction = ease
+        };
+        sharpen.Completed += (_, _) =>
+        {
+            if (ReferenceEquals(guide.Effect, blur)) guide.Effect = null;
+        };
+        blur.BeginAnimation(BlurEffect.RadiusProperty, sharpen);
+
+        scale.BeginAnimation(ScaleTransform.ScaleXProperty,
+            new DoubleAnimation(0.86, 1, Ms(380)) { BeginTime = delay, EasingFunction = ease });
+        scale.BeginAnimation(ScaleTransform.ScaleYProperty,
+            new DoubleAnimation(0.86, 1, Ms(380)) { BeginTime = delay, EasingFunction = ease });
+        guide.BeginAnimation(UIElement.OpacityProperty,
+            new DoubleAnimation(0, 1, Ms(240)) { BeginTime = delay });
+    }
+
+    void HidePlacementGuide()
+    {
+        _placementGuide?.Hide();
     }
 
     void Intro()
@@ -422,7 +671,8 @@ public partial class MainWindow : Window
 
     // ───────────────────────── state ─────────────────────────
 
-    bool MediaActive => _media.HasTrack && (_media.IsPlaying || DateTime.UtcNow - _lastPlaying < PausedGrace);
+    bool MediaActive => _media.HasTrack && (_media.IsPlaying || DateTime.UtcNow - _lastPlaying < PausedGrace)
+        && (!Settings.HideOnIdle || _hasAudioActivity || (DateTime.Now - _lastAudioActivity).TotalSeconds < 3);
 
     void UpdateView()
     {
@@ -532,11 +782,24 @@ public partial class MainWindow : Window
 
     bool EqVisible => Spots.ContainsKey(_current);
 
-    // the bars only cost frames (and audio capture) while they are on screen; once paused they settle and stop
+    // the bars only cost frames while they are on screen; hidden audio monitoring is handled by the 100 ms tick
     void SyncEq()
     {
-        _spectrum.Active = EqVisible && _media.IsPlaying;
-        if (!EqVisible || _eqRunning) return;
+        // Audio monitoring may continue while the island is hidden, but visual animation must not.
+        bool monitorAudio = Settings.HideOnIdle && _media.HasTrack;
+        _spectrum.Active = (EqVisible && _media.IsPlaying) || monitorAudio;
+
+        if (!EqVisible)
+        {
+            if (_eqRunning)
+            {
+                CompositionTarget.Rendering -= OnEqFrame;
+                _eqRunning = false;
+            }
+            return;
+        }
+
+        if (_eqRunning) return;
         _eqRunning = true;
         _eqFrame = _time.Elapsed.TotalSeconds;
         CompositionTarget.Rendering += OnEqFrame;
@@ -696,6 +959,8 @@ public partial class MainWindow : Window
         double size = Math.Max(_size.Value, 0.01);
         RootSize.ScaleX = RootSize.ScaleY = size;
         RootMove.Y = _offset.Value + _gap.Value / size;
+        if (!_placementMode && _placementBottom && _placementMonitor is { } bottomMonitor)
+            PositionOnMonitor(bottomMonitor, true);
         // the lyric line's bitmap is drawn at the size it is shown, pixel for pixel, or it would be blurred
         double dpi = VisualTreeHelper.GetDpi(this).DpiScaleY;
         double sharp = size * scale * dpi;
@@ -932,6 +1197,7 @@ public partial class MainWindow : Window
     {
         _ticks++;
         PollVolume();
+        PollAudioActivity();
         if (_ticks % HeadsetEvery == 1) ReadHeadset(_audio.Device);
         UpdateLyric();
         UpdateTimer();
@@ -969,6 +1235,7 @@ public partial class MainWindow : Window
         }
 
         bool moving = Eq.Tick(bands, level, playing, now, dt);
+
         moving |= Glow.Tick(Eq, now, dt);
 
         // the island's edge lights up on the bass: as far as the lowest bar stands above its usual level. Once the
@@ -983,6 +1250,42 @@ public partial class MainWindow : Window
             CompositionTarget.Rendering -= OnEqFrame;
             _eqRunning = false;
         }
+    }
+
+    /// <summary>Checks for sound at a low rate while the island is hidden, without running the visual frame loop.</summary>
+    void PollAudioActivity()
+    {
+        if (!Settings.HideOnIdle || !_media.HasTrack)
+        {
+            _hasAudioActivity = false;
+            return;
+        }
+
+        bool active;
+        if (_spectrum.Read(_bands))
+        {
+            active = false;
+            for (int i = 0; i < _bands.Length; i++)
+            {
+                if (_bands[i] > AudioActivityThreshold)
+                {
+                    active = true;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            float peak = _audio.Peak();
+            active = peak >= 0 && peak > 0.002f;
+        }
+
+        bool wasActive = _hasAudioActivity;
+        _hasAudioActivity = active;
+        if (active) _lastAudioActivity = DateTime.Now;
+
+        // Wake the island immediately when sound starts or stops; the 3-second timer only handles the linger.
+        if (wasActive != active) UpdateView();
     }
 
     void UpdateClock()
@@ -1540,7 +1843,7 @@ public partial class MainWindow : Window
     }
 
     // switched off in the menu, the lyrics are not even looked up
-    void TrackLyrics() => _lyrics.Track(Settings.Lyrics && _media.HasTrack ? _media.Title : "", _media.Artist);
+    void TrackLyrics() => _lyrics.Track(Settings.Lyrics && _media.HasTrack ? _media.Title : "", _media.Artist, Settings.LyricsFolder);
 
     // ───────────────────────── lyrics ─────────────────────────
 
@@ -1911,6 +2214,35 @@ public partial class MainWindow : Window
 
     // ───────────────────────── pointer ─────────────────────────
 
+    void Window_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!_placementMode) return;
+        e.Handled = true;
+        _placementDragging = true;
+        _placementGrab = e.GetPosition(this);
+        CaptureMouse();
+    }
+
+    void Window_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_placementMode) return;
+        e.Handled = true;
+        if (_placementDragging) FinishPlacement();
+    }
+
+    void Window_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_placementMode || !_placementDragging) return;
+        if (!Native.TryGetCursorPosition(out int x, out int y)) return;
+
+        double dpiX = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        double dpiY = VisualTreeHelper.GetDpi(this).DpiScaleY;
+        Left = x / dpiX - _placementGrab.X;
+        Top = y / dpiY - _placementGrab.Y;
+        UpdatePlacementGuide(x, y);
+        e.Handled = true;
+    }
+
     void Island_MouseEnter(object sender, MouseEventArgs e)
     {
         _hover = true;
@@ -1929,12 +2261,28 @@ public partial class MainWindow : Window
 
     void Root_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (_placementMode)
+        {
+            e.Handled = true;
+            _placementDragging = true;
+            _placementGrab = e.GetPosition(this);
+            Root.CaptureMouse();
+            return;
+        }
+
         _pressed = true;
         SetTargets();
     }
 
     void Root_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (_placementMode)
+        {
+            e.Handled = true;
+            if (_placementDragging) FinishPlacement();
+            return;
+        }
+
         if (!_pressed) return;
         _pressed = false;
 
@@ -1945,8 +2293,28 @@ public partial class MainWindow : Window
         SetTargets();
     }
 
+    void Root_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_placementMode || !_placementDragging) return;
+        if (!Native.TryGetCursorPosition(out int x, out int y)) return;
+
+        double dpiX = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        double dpiY = VisualTreeHelper.GetDpi(this).DpiScaleY;
+        Left = x / dpiX - _placementGrab.X;
+        Top = y / dpiY - _placementGrab.Y;
+        UpdatePlacementGuide(x, y);
+        e.Handled = true;
+    }
+
     void Root_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (_placementMode)
+        {
+            e.Handled = true;
+            CancelPlacement();
+            return;
+        }
+
         // from the settings that is a step back, to the menu they belong to
         Open(_panel == Panel.Menu ? Panel.None : Panel.Menu);
         UpdateSwitches(false);
@@ -2267,6 +2635,14 @@ public partial class MainWindow : Window
         UpdateView();
     }
 
+    void Position_Click(object sender, RoutedEventArgs e)
+    {
+        // The button's mouse-up bubbles to Root; start after that event finishes,
+        // otherwise Root_MouseLeftButtonUp immediately closes the placement mode.
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,
+            new Action(BeginPlacement));
+    }
+
     // the heading of either page
     void SettingsBack_Click(object sender, RoutedEventArgs e)
     {
@@ -2286,6 +2662,24 @@ public partial class MainWindow : Window
         Settings.Lyrics = !Settings.Lyrics;
         UpdateSwitches(true);
         // drops the lyrics of the track that is playing, or goes looking for them
+        TrackLyrics();
+    }
+
+    void LyricsFolder_Click(object sender, RoutedEventArgs e)
+    {
+        using var dialog = new System.Windows.Forms.FolderBrowserDialog
+        {
+            Description = "Выберите папку с файлами LRC",
+            UseDescriptionForTitle = true,
+            SelectedPath = Directory.Exists(Settings.LyricsFolder)
+                ? Settings.LyricsFolder
+                : Environment.GetFolderPath(Environment.SpecialFolder.MyMusic)
+        };
+
+        if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+
+        Settings.LyricsFolder = dialog.SelectedPath;
+        UpdateLook();
         TrackLyrics();
     }
 
@@ -2323,15 +2717,143 @@ public partial class MainWindow : Window
         CheckFullscreen();
     }
 
+    void HideOnIdle_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.HideOnIdle = !Settings.HideOnIdle;
+        UpdateSwitches(true);
+    }
+
+    void CaptureFromDevice_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.CaptureFromApp = !Settings.CaptureFromApp;
+        UpdateSwitches(true);
+        UpdateAudioDeviceVisibility();
+
+        // Если включили захват с приложения, вернуться к устройству по умолчанию
+        if (Settings.CaptureFromApp)
+        {
+            _spectrum.SetDevice(null);
+        }
+        else
+        {
+            // Если выключили (захват с устройства), применить сохраненное устройство
+            _spectrum.SetDevice(Settings.AudioDevice);
+        }
+    }
+
+    void UpdateAudioDeviceVisibility()
+    {
+        AudioDeviceButton.Visibility = Settings.CaptureFromApp ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void AudioDevice_Click(object sender, RoutedEventArgs e)
+    {
+        LoadAudioDevices();
+        _panel = Panel.Settings;
+        UpdateView();
+        AudioDeviceView.Visibility = Visibility.Visible;
+        SettingsView.Visibility = Visibility.Collapsed;
+    }
+
+    void AudioDeviceBack_Click(object sender, RoutedEventArgs e)
+    {
+        AudioDeviceView.Visibility = Visibility.Collapsed;
+        SettingsView.Visibility = Visibility.Visible;
+    }
+
+    void LoadAudioDevices()
+    {
+        AudioDeviceList.Children.Clear();
+
+        try
+        {
+            var devices = SpectrumService.GetDevices();
+            string? current = Settings.AudioDevice;
+
+            foreach (var device in devices)
+            {
+                var button = new Button
+                {
+                    Style = (Style)FindResource("RowButton"),
+                    Height = 44,
+                    Margin = new Thickness(0, 0, 0, 2)
+                };
+
+                var grid = new Grid();
+
+                var nameText = new TextBlock
+                {
+                    Text = device.Name,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(12, 0, 0, 0)
+                };
+
+                if (device.IsDefault)
+                {
+                    var defaultLabel = new TextBlock
+                    {
+                        Text = "По умолчанию",
+                        FontSize = 10.5,
+                        Foreground = new SolidColorBrush(Color.FromArgb(102, 255, 255, 255)),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(12, 16, 0, 0)
+                    };
+                    grid.Children.Add(defaultLabel);
+                }
+
+                grid.Children.Add(nameText);
+
+                if (device.Id == current || (current == null && device.IsDefault))
+                {
+                    var checkMark = new TextBlock
+                    {
+                        Text = "✓",
+                        FontSize = 16,
+                        Foreground = new SolidColorBrush(Colors.White),
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(0, 0, 12, 0)
+                    };
+                    grid.Children.Add(checkMark);
+                }
+
+                button.Content = grid;
+                button.Tag = device;
+                button.Click += SelectAudioDevice_Click;
+
+                AudioDeviceList.Children.Add(button);
+            }
+        }
+        catch (Exception ex)
+        {
+            App.Log(ex);
+        }
+    }
+
+    void SelectAudioDevice_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.Tag is not SpectrumService.AudioDevice device) return;
+
+        Settings.AudioDevice = device.IsDefault ? null : device.Id;
+        _spectrum.SetDevice(Settings.AudioDevice);
+
+        LoadAudioDevices();
+    }
+
     void UpdateSwitches(bool animate)
     {
         LyricsSwitch.Set(Settings.Lyrics, animate);
         LyricEffectsSwitch.Set(Settings.LyricEffects, animate);
-        RimSwitch.Set(Settings.Rim, animate);
         AppVolumeSwitch.Set(Settings.AppVolume, animate);
         NetworkSwitch.Set(Settings.Network, animate);
         FullscreenSwitch.Set(Settings.HideFullscreen, animate);
+        HideOnIdleSwitch.Set(Settings.HideOnIdle, animate);
+        CaptureFromDeviceSwitch.Set(Settings.CaptureFromApp, animate);
         AutostartSwitch.Set(Autostart.Enabled, animate);
+        UpdateLook();
+
+        // Синхронізація переключателів в розділі оформлення
+        LookLyricEffectsSwitch.Set(Settings.LyricEffects, animate);
     }
 
     // ───────────────────────── looks ─────────────────────────
@@ -2386,6 +2908,9 @@ public partial class MainWindow : Window
         SizeText.Text = Settings.Scale + "%";
         GapText.Text = Settings.Gap + " px";
         PulseText.Text = Pulses[Settings.Pulse];
+        LyricsFolderText.Text = string.IsNullOrWhiteSpace(Settings.LyricsFolder)
+            ? "Не выбрана"
+            : Settings.LyricsFolder;
         foreach (RadioButton dot in AccentStrip.Children)
         {
             Color? colour = dot.Background is SolidColorBrush own ? own.Color : null;
@@ -2402,6 +2927,8 @@ public partial class MainWindow : Window
         _gap.Target = Settings.Gap;
         // where "out of sight" is depends on both
         SetTargets();
+        if (!_placementMode && _placementMonitor is { } monitor)
+            PositionOnMonitor(monitor, _placementBottom);
     }
 
     void Exit_Click(object sender, RoutedEventArgs e)

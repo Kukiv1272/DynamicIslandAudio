@@ -6,6 +6,9 @@
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True" ResizeMode="NoResize"
         Focusable="False" UseLayoutRounding="True"
+        PreviewMouseLeftButtonDown="Window_PreviewMouseLeftButtonDown"
+        PreviewMouseLeftButtonUp="Window_PreviewMouseLeftButtonUp"
+        PreviewMouseMove="Window_PreviewMouseMove"
         FontFamily="./Fonts/#SF Pro Text, SF Pro Text, Segoe UI Variable Display, Segoe UI" Foreground="White">
 
     <Window.Resources>
@@ -100,6 +103,48 @@
                         <Border Background="Transparent" Padding="12,0">
                             <ContentPresenter VerticalAlignment="Center"/>
                         </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Стиль для ScrollBar -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="6"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid>
+                            <Border Background="{TemplateBinding Background}" CornerRadius="3"/>
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Style>
+                                            <Style TargetType="Thumb">
+                                                <Setter Property="Background" Value="#33FFFFFF"/>
+                                                <Setter Property="BorderThickness" Value="0"/>
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="Thumb">
+                                                            <Border Background="{TemplateBinding Background}" CornerRadius="3"/>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                                <Style.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="#55FFFFFF"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsDragging" Value="True">
+                                                        <Setter Property="Background" Value="#77FFFFFF"/>
+                                                    </Trigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Thumb.Style>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -242,6 +287,7 @@
     <Grid x:Name="Root" Width="620" Height="410" Opacity="0"
           HorizontalAlignment="Center" VerticalAlignment="Top" RenderTransformOrigin="0.5,0"
           MouseLeftButtonDown="Root_MouseLeftButtonDown" MouseLeftButtonUp="Root_MouseLeftButtonUp"
+          MouseMove="Root_MouseMove"
           MouseRightButtonUp="Root_MouseRightButtonUp" MouseUp="Root_MouseUp" MouseWheel="Root_MouseWheel"
           AllowDrop="True" DragEnter="Root_DragOver" DragOver="Root_DragOver" DragLeave="Root_DragLeave" Drop="Root_Drop">
         <Grid.RenderTransform>
@@ -674,142 +720,205 @@
 
                 <!-- its second page: the switches. The heading leads back -->
                 <Grid x:Name="SettingsView" Width="320" Height="334" HorizontalAlignment="Center" VerticalAlignment="Top">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <local:RowList Margin="10,8,10,0">
+                            <Button Style="{StaticResource RowButton}" Height="32" Margin="0,0,0,2" Click="SettingsBack_Click">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <local:Icon Kind="Back" Width="10" Height="10" Fill="#66FFFFFF" VerticalAlignment="Center"/>
+                                    <TextBlock Text="НАСТРОЙКИ" FontSize="10.5" FontWeight="SemiBold" Foreground="#66FFFFFF"
+                                               Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="CaptureFromDevice_Click">
+                                <Grid>
+                                    <local:Icon Kind="Speaker" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Захват с устройства" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="CaptureFromDeviceSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button x:Name="AudioDeviceButton" Style="{StaticResource RowButton}" Click="AudioDevice_Click">
+                                <Grid>
+                                    <local:Icon Kind="Mid" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Источник звука" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Icon Kind="Chevron" Width="11" Height="11" Fill="{StaticResource Dim}"
+                                                Margin="0,1,0,0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="Lyrics_Click">
+                                <Grid>
+                                    <local:Icon Kind="Lines" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Текст песен" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="LyricsSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button x:Name="LyricsFolderButton" Style="{StaticResource RowButton}" Click="LyricsFolder_Click">
+                                <Grid>
+                                    <local:Icon Kind="Note" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Папка с LRC" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="LyricsFolderText" Width="120" Foreground="{StaticResource Dim}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center"
+                                               TextAlignment="Right" TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="LyricEffects_Click">
+                                <Grid>
+                                    <local:Icon Kind="Sparkle" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Эффекты текста" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="LyricEffectsSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="AppVolume_Click">
+                                <Grid>
+                                    <local:Icon Kind="Mid" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Громкость приложения" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="AppVolumeSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="Network_Click">
+                                <Grid>
+                                    <local:Icon Kind="Wifi" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Уведомления о сети" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="NetworkSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="HideOnIdle_Click">
+                                <Grid>
+                                    <local:Icon Kind="Mute" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Скрывать при бездействии" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="HideOnIdleSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="Fullscreen_Click">
+                                <Grid>
+                                    <local:Icon Kind="Expand" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Скрывать на полном экране" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="FullscreenSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="Autostart_Click">
+                                <Grid>
+                                    <local:Icon Kind="Windows" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Запускать с Windows" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="AutostartSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                        </local:RowList>
+                    </ScrollViewer>
+                </Grid>
+
+                <!-- Audio device selection page -->
+                <Grid x:Name="AudioDeviceView" Width="320" Height="334" HorizontalAlignment="Center" VerticalAlignment="Top"
+                      Visibility="Collapsed">
                     <local:RowList Margin="10,8,10,0">
-                        <Button Style="{StaticResource RowButton}" Height="32" Margin="0,0,0,2" Click="SettingsBack_Click">
+                        <Button Style="{StaticResource RowButton}" Height="32" Margin="0,0,0,2" Click="AudioDeviceBack_Click">
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                 <local:Icon Kind="Back" Width="10" Height="10" Fill="#66FFFFFF" VerticalAlignment="Center"/>
-                                <TextBlock Text="НАСТРОЙКИ" FontSize="10.5" FontWeight="SemiBold" Foreground="#66FFFFFF"
+                                <TextBlock Text="ИСТОЧНИК ЗВУКА" FontSize="10.5" FontWeight="SemiBold" Foreground="#66FFFFFF"
                                            Margin="6,0,0,0" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button Style="{StaticResource RowButton}" Click="Lyrics_Click">
-                            <Grid>
-                                <local:Icon Kind="Lines" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Текст песен" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="LyricsSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
-                        <Button Style="{StaticResource RowButton}" Click="LyricEffects_Click">
-                            <Grid>
-                                <local:Icon Kind="Sparkle" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Эффекты текста" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="LyricEffectsSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
-                        <Button Style="{StaticResource RowButton}" Click="Rim_Click">
-                            <Grid>
-                                <local:Icon Kind="Rim" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Цветной ободок" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="RimSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
-                        <Button Style="{StaticResource RowButton}" Click="AppVolume_Click">
-                            <Grid>
-                                <local:Icon Kind="Mid" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Громкость приложения" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="AppVolumeSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
-                        <Button Style="{StaticResource RowButton}" Click="Network_Click">
-                            <Grid>
-                                <local:Icon Kind="Wifi" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Уведомления о сети" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="NetworkSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
-                        <Button Style="{StaticResource RowButton}" Click="Fullscreen_Click">
-                            <Grid>
-                                <local:Icon Kind="Expand" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Скрывать на полном экране" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="FullscreenSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
-                        <Button Style="{StaticResource RowButton}" Click="Autostart_Click">
-                            <Grid>
-                                <local:Icon Kind="Windows" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Запускать с Windows" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Toggle x:Name="AutostartSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
-                            </Grid>
-                        </Button>
+                        <ScrollViewer x:Name="AudioDeviceScroll" MaxHeight="290" VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="AudioDeviceList"/>
+                        </ScrollViewer>
                     </local:RowList>
                 </Grid>
 
                 <!-- its third: how the island looks. A click on a row steps to its next value and the wheel goes
                      both ways; the colours are picked straight from the strip -->
                 <Grid x:Name="LookView" Width="320" Height="248" HorizontalAlignment="Center" VerticalAlignment="Top">
-                    <local:RowList Margin="10,8,10,0">
-                        <Button Style="{StaticResource RowButton}" Height="32" Margin="0,0,0,2" Click="SettingsBack_Click">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <local:Icon Kind="Back" Width="10" Height="10" Fill="#66FFFFFF" VerticalAlignment="Center"/>
-                                <TextBlock Text="ОФОРМЛЕНИЕ" FontSize="10.5" FontWeight="SemiBold" Foreground="#66FFFFFF"
-                                           Margin="6,0,0,0" VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </Button>
-                        <Button x:Name="SizeRow" Style="{StaticResource RowButton}" Click="Size_Click">
-                            <Grid>
-                                <local:Icon Kind="Size" Width="17" Height="17" Fill="{StaticResource Dim}"
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <local:RowList Margin="10,8,10,0">
+                            <Button Style="{StaticResource RowButton}" Height="32" Margin="0,0,0,2" Click="SettingsBack_Click">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <local:Icon Kind="Back" Width="10" Height="10" Fill="#66FFFFFF" VerticalAlignment="Center"/>
+                                    <TextBlock Text="ОФОРМЛЕНИЕ" FontSize="10.5" FontWeight="SemiBold" Foreground="#66FFFFFF"
+                                               Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="SizeRow" Style="{StaticResource RowButton}" Click="Size_Click">
+                                <Grid>
+                                    <local:Icon Kind="Size" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Размер" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Digits x:Name="SizeText" Foreground="{StaticResource Dim}"
+                                                  HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Button>
+                            <Button x:Name="GapRow" Style="{StaticResource RowButton}" Click="Gap_Click">
+                                <Grid>
+                                    <local:Icon Kind="Gap" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Отступ от края" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Digits x:Name="GapText" Foreground="{StaticResource Dim}"
+                                                  HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Button>
+                            <Button x:Name="PositionRow" Style="{StaticResource RowButton}" Click="Position_Click">
+                                <Grid>
+                                    <local:Icon Kind="Expand" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Изменить положение" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Button>
+                            <!-- how brightly the edge lights up on the bass of the music -->
+                            <Button x:Name="PulseRow" Style="{StaticResource RowButton}" Click="Pulse_Click">
+                                <Grid>
+                                    <local:Icon Kind="Pulse" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Пульс ободка" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="PulseText" Foreground="{StaticResource Dim}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource RowButton}" Click="LyricEffects_Click">
+                                <Grid>
+                                    <local:Icon Kind="Sparkle" Width="17" Height="17" Fill="{StaticResource Dim}"
+                                                HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Эффекты текста" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                    <local:Toggle x:Name="LookLyricEffectsSwitch" Width="38" Height="22" HorizontalAlignment="Right"/>
+                                </Grid>
+                            </Button>
+                            <Grid Height="40" Margin="12,0">
+                                <local:Icon Kind="Drop" Width="17" Height="17" Fill="{StaticResource Dim}"
                                             HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Размер" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Digits x:Name="SizeText" Foreground="{StaticResource Dim}"
-                                              HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                            </Grid>
-                        </Button>
-                        <Button x:Name="GapRow" Style="{StaticResource RowButton}" Click="Gap_Click">
-                            <Grid>
-                                <local:Icon Kind="Gap" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Отступ от края" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <local:Digits x:Name="GapText" Foreground="{StaticResource Dim}"
-                                              HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                            </Grid>
-                        </Button>
-                        <!-- how brightly the edge lights up on the bass of the music -->
-                        <Button x:Name="PulseRow" Style="{StaticResource RowButton}" Click="Pulse_Click">
-                            <Grid>
-                                <local:Icon Kind="Pulse" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                            HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                                <TextBlock Text="Пульс ободка" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="PulseText" Foreground="{StaticResource Dim}"
+                                <TextBlock Text="Акцентный цвет" FontSize="13.5" Margin="29,0,0,0" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="AccentText" FontSize="13.5" Foreground="{StaticResource Dim}"
                                            HorizontalAlignment="Right" VerticalAlignment="Center"/>
                             </Grid>
-                        </Button>
-                        <Grid Height="40" Margin="12,0">
-                            <local:Icon Kind="Drop" Width="17" Height="17" Fill="{StaticResource Dim}"
-                                        HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                            <TextBlock Text="Акцентный цвет" FontSize="13.5" Margin="29,0,0,0" VerticalAlignment="Center"/>
-                            <TextBlock x:Name="AccentText" FontSize="13.5" Foreground="{StaticResource Dim}"
-                                       HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                        </Grid>
-                        <!-- the first leaves the colour to the cover -->
-                        <UniformGrid x:Name="AccentStrip" Rows="1" Height="30" Margin="8,0">
-                            <RadioButton Style="{StaticResource Swatch}" Tag="Из обложки" Click="Accent_Click">
-                                <RadioButton.Background>
-                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                        <GradientStop Color="#FF375F" Offset="0"/>
-                                        <GradientStop Color="#FFD60A" Offset="0.35"/>
-                                        <GradientStop Color="#30D158" Offset="0.65"/>
-                                        <GradientStop Color="#0A84FF" Offset="1"/>
-                                    </LinearGradientBrush>
-                                </RadioButton.Background>
-                            </RadioButton>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#FFFFFF" Tag="Белый" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#FF453A" Tag="Красный" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#FF9F0A" Tag="Оранжевый" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#FFD60A" Tag="Жёлтый" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#30D158" Tag="Зелёный" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#64D2FF" Tag="Голубой" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#0A84FF" Tag="Синий" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#BF5AF2" Tag="Фиолетовый" Click="Accent_Click"/>
-                            <RadioButton Style="{StaticResource Swatch}" Background="#FF375F" Tag="Розовый" Click="Accent_Click"/>
-                        </UniformGrid>
-                    </local:RowList>
+                            <!-- the first leaves the colour to the cover -->
+                            <UniformGrid x:Name="AccentStrip" Rows="1" Height="30" Margin="8,0">
+                                <RadioButton Style="{StaticResource Swatch}" Tag="Из обложки" Click="Accent_Click">
+                                    <RadioButton.Background>
+                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                            <GradientStop Color="#FF375F" Offset="0"/>
+                                            <GradientStop Color="#FFD60A" Offset="0.35"/>
+                                            <GradientStop Color="#30D158" Offset="0.65"/>
+                                            <GradientStop Color="#0A84FF" Offset="1"/>
+                                        </LinearGradientBrush>
+                                    </RadioButton.Background>
+                                </RadioButton>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#FFFFFF" Tag="Белый" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#FF453A" Tag="Красный" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#FF9F0A" Tag="Оранжевый" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#FFD60A" Tag="Жёлтый" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#30D158" Tag="Зелёный" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#64D2FF" Tag="Голубой" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#0A84FF" Tag="Синий" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#BF5AF2" Tag="Фиолетовый" Click="Accent_Click"/>
+                                <RadioButton Style="{StaticResource Swatch}" Background="#FF375F" Tag="Розовый" Click="Accent_Click"/>
+                            </UniformGrid>
+                        </local:RowList>
+                    </ScrollViewer>
                 </Grid>
 
                 <!-- the shelf: files put down on the island, to be dragged out somewhere else. A file dragged over the

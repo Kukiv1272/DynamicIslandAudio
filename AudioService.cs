@@ -256,6 +256,7 @@ interface IMMDeviceEnumerator
 {
     [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
     [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice? device);
+    [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice? device);
 }
 
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

@@ -2,16 +2,19 @@ using System.Runtime.InteropServices;
 
 namespace DynamicIsland;
 
-/// <summary>Live spectrum of whatever the default playback device is outputting (WASAPI loopback).</summary>
+/// <summary>Live spectrum of a selected playback device (WASAPI loopback).</summary>
 sealed class SpectrumService
 {
     public const int Bands = SpectrumAnalyzer.Bands;
 
-    const int ERender = 0, EMultimedia = 1, ClsCtxAll = 23;
+    const int ERender = 0, EMultimedia = 1, EAll = 2, ClsCtxAll = 23, StateActive = 1;
     const int StreamLoopback = 0x00020000, BufferSilent = 2;
     const int FormatPcm = 1, FormatFloat = 3, FormatExtensible = 0xFFFE;
     const long BufferDuration = 2_000_000; // 200 ms, in 100 ns units
-    const int PollMs = 8, SilenceMs = 80, LingerMs = 3000, RetryMs = 2000, DeviceCheckMs = 2000;
+    const int PollMs = 16, AnalyzeMs = 32, SilenceMs = 80, LingerMs = 3000, RetryMs = 2000, DeviceCheckMs = 2000;
+
+    /// <summary>Available audio output device.</summary>
+    public record AudioDevice(string Id, string Name, bool IsDefault);
 
     readonly object _gate = new();
     readonly float[] _bands = new float[Bands];
@@ -19,6 +22,7 @@ sealed class SpectrumService
     readonly AutoResetEvent _wake = new(false);
     Thread? _thread;
     volatile bool _active, _failed;
+    string? _targetDeviceId; // ID устройства, которое нужно захватывать (null = default)
 
     // capture thread only
     IAudioClient? _client;
@@ -30,7 +34,7 @@ sealed class SpectrumService
     float[] _floats = Array.Empty<float>();
     short[] _shorts = Array.Empty<short>();
     float[] _mono = Array.Empty<float>();
-    long _lastData;
+    long _lastData, _lastAnalyze;
     bool _fresh;
 
     /// <summary>Capture runs only while someone is watching; it winds down a few seconds after.</summary>
@@ -50,6 +54,114 @@ sealed class SpectrumService
             _wake.Set();
         }
     }
+
+    /// <summary>Sets the device to capture from. Null means default device.</summary>
+    public void SetDevice(string? deviceId)
+    {
+        if (_targetDeviceId == deviceId) return;
+        _targetDeviceId = deviceId;
+        // Force reconnection to new device
+        if (_active)
+        {
+            Close();
+            _wake.Set();
+        }
+    }
+
+    /// <summary>Returns list of all active audio output devices.</summary>
+    public static List<AudioDevice> GetDevices()
+    {
+        var devices = new List<AudioDevice>();
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+        IMMDeviceCollection? collection = null;
+        IMMDevice? defaultDevice = null;
+        string? defaultId = null;
+
+        try
+        {
+            // Get default device ID
+            if (enumerator.GetDefaultAudioEndpoint(ERender, EMultimedia, out defaultDevice) == 0 && defaultDevice != null)
+            {
+                defaultDevice.GetId(out defaultId);
+                Marshal.ReleaseComObject(defaultDevice);
+                defaultDevice = null;
+            }
+
+            // Enumerate all active render devices
+            if (enumerator.EnumAudioEndpoints(ERender, StateActive, out IntPtr collectionPtr) == 0)
+            {
+                collection = Marshal.GetObjectForIUnknown(collectionPtr) as IMMDeviceCollection;
+                if (collection != null && collection.GetCount(out uint count) == 0)
+                {
+                    for (uint i = 0; i < count; i++)
+                    {
+                        if (collection.Item(i, out IMMDevice? device) == 0 && device != null)
+                        {
+                            try
+                            {
+                                if (device.GetId(out string? id) == 0 && id != null)
+                                {
+                                    string name = GetDeviceName(device);
+                                    bool isDefault = id == defaultId;
+                                    devices.Add(new AudioDevice(id, name, isDefault));
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.ReleaseComObject(device);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            App.Log(ex);
+        }
+        finally
+        {
+            if (collection != null) Marshal.ReleaseComObject(collection);
+            Marshal.ReleaseComObject(enumerator);
+        }
+
+        return devices;
+    }
+
+    static string GetDeviceName(IMMDevice device)
+    {
+        try
+        {
+            if (device.OpenPropertyStore(0, out IPropertyStore? store) == 0 && store != null)
+            {
+                try
+                {
+                    var key = new PropertyKey(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 14); // FriendlyName
+                    if (store.GetValue(ref key, out PropVariant value) == 0)
+                    {
+                        try
+                        {
+                            if (value.Type == 31) // VT_LPWSTR
+                                return Marshal.PtrToStringUni(value.Value) ?? "Unknown Device";
+                        }
+                        finally
+                        {
+                            PropVariantClear(ref value);
+                        }
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(store);
+                }
+            }
+        }
+        catch { }
+        return "Unknown Device";
+    }
+
+    [DllImport("ole32.dll")]
+    static extern int PropVariantClear(ref PropVariant value);
 
     /// <summary>Copies the current band powers (bass → treble). False when loopback capture is unavailable.</summary>
     public bool Read(float[] bands)
@@ -88,9 +200,10 @@ sealed class SpectrumService
                 }
                 else if (now - lastCheck > DeviceCheckMs)
                 {
-                    // headphones plugged in: follow the new default device
+                    // check if target device changed or if device disappeared
                     lastCheck = now;
-                    if (DefaultDeviceId() != _deviceId)
+                    string? targetId = _targetDeviceId ?? DefaultDeviceId();
+                    if (targetId != _deviceId)
                     {
                         Close();
                         continue;
@@ -123,7 +236,16 @@ sealed class SpectrumService
         IMMDevice? device = null;
         try
         {
-            if (enumerator.GetDefaultAudioEndpoint(ERender, EMultimedia, out device) != 0 || device == null) return false;
+            // Use target device if specified, otherwise default
+            if (_targetDeviceId != null)
+            {
+                if (enumerator.GetDevice(_targetDeviceId, out device) != 0 || device == null) return false;
+            }
+            else
+            {
+                if (enumerator.GetDefaultAudioEndpoint(ERender, EMultimedia, out device) != 0 || device == null) return false;
+            }
+
             if (device.GetId(out _deviceId) != 0) return false;
 
             Guid iid = typeof(IAudioClient).GUID;
@@ -156,6 +278,7 @@ sealed class SpectrumService
 
             _analyzer = new SpectrumAnalyzer(rate);
             _lastData = 0;
+            _lastAnalyze = 0;
             return true;
         }
         finally
@@ -190,6 +313,7 @@ sealed class SpectrumService
         _capture = null;
         _client = null;
         _analyzer = null;
+        _lastAnalyze = 0;
         lock (_gate) Array.Clear(_bands);
     }
 
@@ -246,14 +370,19 @@ sealed class SpectrumService
 
     void Analyze()
     {
+        long now = Environment.TickCount64;
+
         // loopback delivers nothing while nobody plays, so the last window would otherwise stick
-        if (Environment.TickCount64 - _lastData > SilenceMs)
+        if (now - _lastData > SilenceMs)
         {
             lock (_gate) Array.Clear(_bands);
             return;
         }
-        if (!_fresh) return;
+
+        // Keep collecting samples, but do the expensive FFT only about 30 times per second.
+        if (!_fresh || now - _lastAnalyze < AnalyzeMs) return;
         _fresh = false;
+        _lastAnalyze = now;
 
         _analyzer!.Analyze(_scratch);
         lock (_gate) Array.Copy(_scratch, _bands, Bands);
@@ -397,4 +526,11 @@ interface IAudioCaptureClient
     [PreserveSig] int GetBuffer(out IntPtr data, out uint frames, out int flags, out long devicePosition, out long qpcPosition);
     [PreserveSig] int ReleaseBuffer(uint frames);
     [PreserveSig] int GetNextPacketSize(out uint frames);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceCollection
+{
+    [PreserveSig] int GetCount(out uint count);
+    [PreserveSig] int Item(uint index, out IMMDevice? device);
 }

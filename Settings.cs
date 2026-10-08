@@ -15,10 +15,16 @@ static class Settings
     static bool _lyrics = Read(nameof(Lyrics)), _lyricEffects = Read(nameof(LyricEffects));
     static bool _network = Read(nameof(Network)), _hideFullscreen = Read(nameof(HideFullscreen));
     static bool _rim = Read(nameof(Rim)), _appVolume = Read(nameof(AppVolume));
+    static bool _captureFromDevice = Read(nameof(CaptureFromApp));
+    static bool _hideOnIdle = Read(nameof(HideOnIdle));
     static int _scale = Math.Clamp(Read(nameof(Scale), 100), MinScale, MaxScale);
     static int _gap = Math.Clamp(Read(nameof(Gap), 8), 0, MaxGap);
     static int _accent = Read(nameof(Accent), 0);
     static int _pulse = Math.Clamp(Read(nameof(Pulse), 2), 0, MaxPulse);
+    static string? _audioDevice = ReadString(nameof(AudioDevice));
+    static string? _lyricsFolder = ReadString(nameof(LyricsFolder));
+    static string? _placementMonitor = ReadString(nameof(PlacementMonitor));
+    static bool _placementBottom = Read(nameof(PlacementBottom), 0) != 0;
 
     /// <summary>Look the lyrics of the track up and show them. Off: nothing is sent to LRCLIB.</summary>
     public static bool Lyrics
@@ -37,6 +43,13 @@ static class Settings
         set => Write(nameof(LyricEffects), _lyricEffects = value);
     }
 
+    /// <summary>Folder searched first for local .lrc files.</summary>
+    public static string? LyricsFolder
+    {
+        get => _lyricsFolder;
+        set => WriteString(nameof(LyricsFolder), _lyricsFolder = value);
+    }
+
     /// <summary>While music plays, the island's light edge takes the colour of the cover. Off: it stays white.</summary>
     public static bool Rim
     {
@@ -49,6 +62,20 @@ static class Settings
     {
         get => _appVolume;
         set => Write(nameof(AppVolume), _appVolume = value);
+    }
+
+    /// <summary>Capture audio from the playing application instead of from a specific device.</summary>
+    public static bool CaptureFromApp
+    {
+        get => _captureFromDevice;
+        set => Write(nameof(CaptureFromApp), _captureFromDevice = value);
+    }
+
+    /// <summary>Hide the island and show only the clock when there is no audio activity.</summary>
+    public static bool HideOnIdle
+    {
+        get => _hideOnIdle;
+        set => Write(nameof(HideOnIdle), _hideOnIdle = value);
     }
 
     /// <summary>Notices about Wi-Fi, Ethernet and VPN.</summary>
@@ -91,6 +118,27 @@ static class Settings
     {
         get => _pulse;
         set => Write(nameof(Pulse), _pulse = Math.Clamp(value, 0, MaxPulse));
+    }
+
+    /// <summary>ID of the audio device to capture spectrum from. Null means default device.</summary>
+    public static string? AudioDevice
+    {
+        get => _audioDevice;
+        set => WriteString(nameof(AudioDevice), _audioDevice = value);
+    }
+
+    /// <summary>Device name of the monitor where the island is placed; null means the primary monitor.</summary>
+    public static string? PlacementMonitor
+    {
+        get => _placementMonitor;
+        set => WriteString(nameof(PlacementMonitor), _placementMonitor = value);
+    }
+
+    /// <summary>Whether the island is attached to the bottom edge instead of the top edge.</summary>
+    public static bool PlacementBottom
+    {
+        get => _placementBottom;
+        set => Write(nameof(PlacementBottom), _placementBottom = value);
     }
 
     /// <summary>Paths of the files lying on the shelf, in the order they were put there.</summary>
@@ -137,6 +185,19 @@ static class Settings
         }
     }
 
+    static string? ReadString(string name)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(Key);
+            return key?.GetValue(name) as string;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     static void Write(string name, bool value) => Write(name, value ? 1 : 0);
 
     static void Write(string name, int value)
@@ -149,6 +210,22 @@ static class Settings
         catch (Exception ex)
         {
             // not saved: the setting still holds until the island is closed
+            App.Log(ex);
+        }
+    }
+
+    static void WriteString(string name, string? value)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(Key);
+            if (value != null)
+                key.SetValue(name, value, RegistryValueKind.String);
+            else
+                key.DeleteValue(name, false);
+        }
+        catch (Exception ex)
+        {
             App.Log(ex);
         }
     }

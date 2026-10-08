@@ -11,7 +11,9 @@ static class Native
     public const long WS_MAXIMIZE = 0x01000000;
     public const long WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
     public const long WS_EX_TOOLWINDOW = 0x00000080;
+    public const long WS_EX_APPWINDOW = 0x00040000;
     public const long WS_EX_NOACTIVATE = 0x08000000;
+    public const long WS_EX_TRANSPARENT = 0x00000020;
 
     const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
     const uint MONITOR_DEFAULTTONEAREST = 2;
@@ -23,6 +25,25 @@ static class Native
 
     [StructLayout(LayoutKind.Sequential)]
     struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct MONITORINFOEX
+    {
+        public int cbSize;
+        public RECT rcMonitor, rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szDevice;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    public readonly record struct Monitor(string Name, int Left, int Top, int Right, int Bottom, bool Primary)
+    {
+        public int Width => Right - Left;
+        public int Height => Bottom - Top;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     struct SYSTEM_POWER_STATUS
@@ -46,6 +67,9 @@ static class Native
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(POINT point, uint flags);
+    [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFOEX info);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT point);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern int GetClassName(IntPtr hwnd, StringBuilder name, int max);
@@ -77,6 +101,65 @@ static class Native
 
     public static void KeepOnTop(IntPtr hwnd) =>
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    public static void MakeClickThrough(IntPtr hwnd)
+    {
+        long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT));
+    }
+
+    public static bool TryGetCursorPosition(out int x, out int y)
+    {
+        if (GetCursorPos(out POINT point))
+        {
+            x = point.X;
+            y = point.Y;
+            return true;
+        }
+
+        x = y = 0;
+        return false;
+    }
+
+    public static List<Monitor> GetMonitors()
+    {
+        try
+        {
+            return System.Windows.Forms.Screen.AllScreens
+                .Select(screen => new Monitor(screen.DeviceName, screen.Bounds.Left, screen.Bounds.Top,
+                    screen.Bounds.Right, screen.Bounds.Bottom, screen.Primary))
+                .ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    public static Monitor? MonitorAt(int x, int y)
+    {
+        try
+        {
+            var screens = System.Windows.Forms.Screen.AllScreens;
+            var screen = screens.FirstOrDefault(item => item.Bounds.Contains(x, y))
+                ?? screens.OrderBy(item => DistanceSquared(item.Bounds, x, y)).FirstOrDefault();
+            return screen == null
+                ? null
+                : new Monitor(screen.DeviceName, screen.Bounds.Left, screen.Bounds.Top,
+                    screen.Bounds.Right, screen.Bounds.Bottom, screen.Primary);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static long DistanceSquared(System.Drawing.Rectangle rect, int x, int y)
+    {
+        int dx = x < rect.Left ? rect.Left - x : x > rect.Right ? x - rect.Right : 0;
+        int dy = y < rect.Top ? rect.Top - y : y > rect.Bottom ? y - rect.Bottom : 0;
+        return (long)dx * dx + (long)dy * dy;
+    }
 
     /// <summary>True when a game / video covers the whole primary monitor.</summary>
     public static bool IsForegroundFullscreen(IntPtr self)
